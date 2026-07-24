@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+dist/
+tmp/
+*.xcodeproj/
+*.xcworkspace/
+CodexRemote.app/
+*.dmg
+*.dmg.sha256
