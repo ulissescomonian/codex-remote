@@ -44,13 +44,15 @@ running -> pairing -> running + pairing code | failure
 
 Somente uma operacao mutavel roda por vez. A verificacao periodica nao deve substituir um estado transitorio.
 
-Com a recuperacao automatica ligada, cada ciclo de polling reconcilia o estado desejado. Um daemon parado e iniciado novamente com intervalo minimo de 30 segundos entre tentativas. Se uma tentativa automatica falhar com o daemon parado, uma unica segunda tentativa e agendada pelo proprio ViewModel depois desse intervalo, independentemente do polling visual. A task pendente e cancelada ao recuperar, desativar auto-start ou executar Stop manual. Stop manual suprime a recuperacao durante a sessao atual do app; Start manual ou uma nova abertura remove essa supressao.
+Com a recuperacao automatica ligada, cada ciclo de polling reconcilia o estado desejado. Um daemon parado e iniciado novamente com intervalo minimo de 30 segundos entre tentativas. Se uma tentativa automatica falhar com o daemon parado, uma unica segunda tentativa e agendada pelo proprio ViewModel depois desse intervalo, independentemente do polling visual. Se a segunda tentativa ou o Start de um Restart falhar, novas tentativas ficam suspensas durante a sessao para impedir um ciclo indefinido. A task pendente e cancelada ao recuperar, desativar auto-start ou executar Stop manual. Stop manual tambem suprime a recuperacao; Start ou Restart manual e uma nova abertura removem a supressao antes da tentativa solicitada.
 
 ## Contrato de processo
 
-Cada chamada recebe URL do executavel, array de argumentos, ambiente minimo opcional e timeout. O app nao executa `/bin/zsh -c`, nao interpola strings e nao herda dados secretos deliberadamente.
+Cada chamada recebe URL do executavel, array de argumentos, ambiente minimo opcional e timeout. O app nao executa `/bin/zsh -c`, nao interpola strings e nao herda dados secretos deliberadamente. Start e Pair usam timeout de 15 segundos. Stop, inclusive dentro de Restart, usa 75 segundos porque o daemon gerenciado pode reservar 60 segundos para encerramento gracioso e ate 70 segundos para concluir sua propria estrategia de parada.
 
 No timeout, o runner envia SIGTERM e aguarda o encerramento do processo pai, com fallback SIGKILL depois de 500 ms. A conclusao por timeout nao espera EOF de stdout/stderr, porque um descendente pode manter os pipes herdados abertos indefinidamente; callbacks tardios nao podem completar a mesma continuation duas vezes.
+
+Se Stop atingir o timeout, o servico consulta novamente o socket. Daemon ja parado transforma o resultado em sucesso, evitando erro falso quando apenas a resposta do comando atrasou. Daemon ainda ativo produz uma falha contextual que informa explicitamente que a parada nao terminou e que o daemon continua ativo. Estado desconhecido preserva o timeout original.
 
 Comandos do MVP:
 
@@ -60,13 +62,13 @@ codex remote-control stop --json
 codex remote-control pair --json
 ```
 
-Restart executa Stop e Start sequencialmente. Saida JSON de Pair deve ser analisada de forma tolerante a nomes de campo conhecidos. `pairingCode` e um valor opaco, separado de `manualPairingCode`, e vira o parametro `pairing_code` de `https://chatgpt.com/codex/pair` por composicao segura de URL. O QR codifica essa URL completa; ele nunca e derivado do codigo manual. Texto bruto jamais e exibido ou persistido.
+Restart executa Stop e Start sequencialmente. Saida JSON de Pair deve ser analisada de forma tolerante a nomes de campo conhecidos. `pairingCode` e um valor opaco, separado de `manualPairingCode`, e vira o parametro `pairing_code` de `https://chatgpt.com/codex/pair` por composicao segura de URL. O QR codifica essa URL completa; ele nunca e derivado do codigo manual. Texto bruto jamais e exibido ou persistido. Quando o CLI indicar que `remoteControl/pairing/start` nao esta disponivel ou que o enrollment foi rejeitado pelo backend, o erro tecnico e substituido por orientacao para o fluxo atual no ChatGPT, com atalho para abrir o app. Outras falhas de Pair preservam o diagnostico sanitizado. O `MenuBarExtra` usa altura fixa e compacta para o cabecalho e para a area central; controles, avisos e erros se alternam dentro dessa area sem alterar a geometria da janela. Mensagens extensas rolam dentro do painel em vez de expandi-lo.
 
 O CLI pode manter Start aberto por ate 10 segundos enquanto espera a conexao remota. Durante Restart, o ViewModel faz probes locais somente de leitura; quando o socket responde, muda a apresentacao de `iniciando` para `reconectando` sem liberar acoes conflitantes. Se o CLI terminar com a assinatura especifica de conexao remota em erro, mas o probe confirmar o daemon ativo, o resultado e sucesso parcial e fica registrado como aviso amarelo do ultimo inicio. Outras falhas continuam sendo erros. Esse aviso usa tempo passado, nao equivale a um probe remoto e nao descreve o estado atual da conexao.
 
 Uma falha de Start contendo simultaneamente `app server did not become ready` e `app-server-control.sock` permite uma unica tentativa de reparo. O reparo tenta primeiro `remote-control stop --json`, mas Stop com exit zero nao e prova de que o updater saiu: a inspecao segura ainda procura um candidato excepcional. Se nao houver candidato seguro, o sucesso do Stop basta para permitir novo Start; se o Stop falhar, a ausencia de candidato seguro continua sendo falha.
 
-Nos dois caminhos, o CLI que falhou deve ser o standalone `current`; o PID file precisa ser regular, pequeno, sem symlink e do usuario atual; PID, UID, inicio, argumentos, executavel carregado e raiz de releases precisam coincidir. O caminho com `app-server.pid` zumbi e avaliado primeiro e aceita o pai carregado por qualquer release standalone gerenciada, inclusive durante a transicao em que o executavel real ainda e antigo mas o argv ja aponta diretamente para a release `current`. O filho precisa estar em estado `Z`, pertencer ao mesmo UID, ter o updater como PPID, preservar o horario de inicio e estar com o socket `~/.codex/app-server-control/app-server-control.sock` ausente. Como um zumbi nao pode retomar execucao, esse caminho usa duas revalidacoes imediatas. Sem zumbi, um updater carregado por release diferente de `current` exige o mesmo fingerprint estavel por pelo menos 30 segundos. Nao ha SIGKILL, exclusao de PID file nem repeticao do sinal para o mesmo fingerprint.
+Nos dois caminhos, o CLI que falhou deve ser o standalone `current`; todo PID file presente precisa ser regular, pequeno, sem symlink e do usuario atual; PID, UID, inicio, argumentos, executavel carregado e raiz de releases precisam coincidir. O caminho com `app-server.pid` zumbi e avaliado primeiro e aceita o pai carregado por qualquer release standalone gerenciada, inclusive durante a transicao em que o executavel real ainda e antigo mas o argv ja aponta diretamente para a release `current`. O Stop oficial pode remover `app-server-updater.pid` antes de o updater colher o filho zumbi. Somente nessa ausencia, o PPID obtido do filho registrado pode fornecer o candidato a updater; a identidade completa do pai e a origem do candidato precisam permanecer iguais em duas leituras. Um arquivo de updater presente mas inseguro nunca usa esse fallback. O filho precisa estar em estado `Z`, pertencer ao mesmo UID, preservar o horario de inicio e estar com o socket `~/.codex/app-server-control/app-server-control.sock` ausente. Como um zumbi nao pode retomar execucao, esse caminho usa duas revalidacoes imediatas. Sem zumbi, um updater carregado por release diferente de `current` exige o mesmo fingerprint estavel por pelo menos 30 segundos. Nao ha SIGKILL, exclusao de PID file nem repeticao do sinal para o mesmo fingerprint.
 
 O stderr de Start pode anexar historico antigo do app-server. A camada de servico substitui essa assinatura por uma mensagem curta e, nas demais falhas, remove ANSI, paths absolutos e valores com formato de credencial antes de entregar o texto a UI.
 
@@ -94,12 +96,14 @@ Pairing codes, payload/URL do QR, stdout integral e credenciais nao sao persisti
 - Runner falso para validar argumentos, sequencia e erros.
 - Runner falso e fixtures para daemon respondendo, socket ausente, timeout e JSON invalido.
 - Fixtures JSON para Pair, incluindo payload opaco, codigo manual opcional e expiracao.
+- Classificacao da indisponibilidade de Pair sem expor `deadline`, paths ou artefatos de pareamento, mantendo falhas nao relacionadas distintas.
 - Geracao e decodificacao offline do QR com payload sintetico.
 - View model em `@MainActor`, usando servico falso.
+- Geometria do menu medida por `NSHostingView`, exigindo dimensoes identicas com controles normais ou erro extenso.
 - Fases observaveis do Restart e classificacao entre sucesso parcial de conexao e falha real.
-- Retry automatico independente do polling, cancelamento por Stop/opt-out/sucesso e ausencia de duplicatas.
+- Retry automatico independente do polling, cancelamento por Stop/opt-out/sucesso, supressao depois da segunda falha e ausencia de duplicatas.
 - Stop oficial bem-sucedido com e sem updater antigo validado.
-- Updater gerenciado atual ou antigo com filho zumbi validado, inclusive argv direto em `current`, alem de rejeicoes por estado, PPID, inicio, socket ou identidade divergentes.
+- Updater gerenciado atual ou antigo com filho zumbi validado, inclusive argv direto em `current` e fallback seguro quando Stop ja removeu o PID file do updater, alem de rejeicoes por estado, PPID, inicio, socket, arquivo inseguro ou identidade divergentes.
 - Sanitizacao de stderr historico, ANSI, paths locais e valores com formato de credencial.
 - Timeout real com descendente mantendo pipes abertos e captura normal separada de stdout/stderr.
 - Nenhum teste de unidade invoca o CLI real.

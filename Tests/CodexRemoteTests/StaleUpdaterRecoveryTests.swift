@@ -140,6 +140,56 @@ struct StaleUpdaterRecoveryTests {
         #expect(controller.terminatedPIDs == [testRecord.pid])
     }
 
+    @Test("A zombie child safely identifies its updater after Stop removed the updater record")
+    func missingUpdaterRecordUsesValidatedZombieParent() async throws {
+        let layout = try StandaloneLayout()
+        let runner = RecoveryRunner(results: missingUpdaterRecordZombieResults(layout: layout))
+        let updater = StaleUpdaterProcessIdentity(
+            uid: getuid(),
+            executablePath: layout.currentExecutable.path
+        )
+        let controller = RecoveryProcessController(
+            identities: [updater, updater],
+            runningStates: [false]
+        )
+        let recovery = makeRecovery(
+            layout: layout,
+            runner: runner,
+            controller: controller,
+            updaterRecordLoader: ThrowingPIDRecordLoader(error: .pidRecordMissing),
+            appServerRecord: zombieChildRecord,
+            staleConfirmationInterval: 30
+        )
+
+        try await recovery.recover(codexURL: layout.currentExecutable)
+
+        #expect(controller.terminatedPIDs == [testRecord.pid])
+        #expect(controller.identityCallCount == 2)
+    }
+
+    @Test("An unsafe updater record never falls back to a zombie-derived parent")
+    func unsafeUpdaterRecordDoesNotUseZombieParent() async {
+        let layout = try! StandaloneLayout()
+        let runner = RecoveryRunner(results: [
+            .success(.init(exitCode: 1, stdout: Data(), stderr: Data())),
+        ])
+        let controller = RecoveryProcessController(identities: [])
+        let recovery = makeRecovery(
+            layout: layout,
+            runner: runner,
+            controller: controller,
+            updaterRecordLoader: ThrowingPIDRecordLoader(
+                error: .unsafeCandidate("registro inseguro simulado")
+            ),
+            appServerRecord: zombieChildRecord
+        )
+
+        await expectRecoveryFailure(recovery, codexURL: layout.currentExecutable)
+
+        #expect(controller.terminateCallCount == 0)
+        #expect(controller.identityCallCount == 0)
+    }
+
     @Test("An old managed updater with a zombie child is terminated immediately")
     func oldUpdaterWithZombieChildIsTerminatedImmediately() async throws {
         let layout = try StandaloneLayout()
@@ -501,7 +551,7 @@ struct StaleUpdaterRecoveryTests {
 
 private let testRecord = StaleUpdaterPIDRecord(
     pid: 10_128,
-    processStartTime: "Sat Jul 11 19:49:39 2026"
+    processStartTime: "Wed Jul  1 19:49:39 2026"
 )
 
 private let zombieChildRecord = StaleUpdaterPIDRecord(
@@ -513,13 +563,14 @@ private func makeRecovery(
     layout: StandaloneLayout,
     runner: RecoveryRunner,
     controller: RecoveryProcessController,
+    updaterRecordLoader: (any StaleUpdaterPIDRecordLoading)? = nil,
     appServerRecord: StaleUpdaterPIDRecord = testRecord,
     staleConfirmationInterval: TimeInterval = 0,
     now: @escaping () -> Date = Date.init
 ) -> StaleUpdaterRecovery {
     StaleUpdaterRecovery(
         runner: runner,
-        pidRecordLoader: FixedPIDRecordLoader(record: testRecord),
+        pidRecordLoader: updaterRecordLoader ?? FixedPIDRecordLoader(record: testRecord),
         appServerPIDRecordLoader: FixedPIDRecordLoader(record: appServerRecord),
         processController: controller,
         homeDirectory: layout.homeDirectory,
@@ -528,6 +579,24 @@ private func makeRecovery(
         staleConfirmationInterval: staleConfirmationInterval,
         now: now
     )
+}
+
+private func missingUpdaterRecordZombieResults(
+    layout: StandaloneLayout
+) -> [Result<ProcessResult, Error>] {
+    let childLine = zombieProcessLine(
+        parentPID: testRecord.pid,
+        state: "Z",
+        startTime: zombieChildRecord.processStartTime
+    ) + " <defunct>\n"
+    let updaterLine = processLine(executable: layout.currentExecutable) + "\n"
+    return [
+        .success(.init(exitCode: 1, stdout: Data(), stderr: Data())),
+        .success(.init(exitCode: 0, stdout: Data(childLine.utf8), stderr: Data())),
+        .success(.init(exitCode: 0, stdout: Data(updaterLine.utf8), stderr: Data())),
+        .success(.init(exitCode: 0, stdout: Data(childLine.utf8), stderr: Data())),
+        .success(.init(exitCode: 0, stdout: Data(updaterLine.utf8), stderr: Data())),
+    ]
 }
 
 private func recoveryResults(
@@ -558,11 +627,11 @@ private func currentZombieRecoveryResults(
 }
 
 private func processLine(executable: URL) -> String {
-    "\(getuid()) \(testRecord.processStartTime) \(executable.path) app-server daemon pid-update-loop"
+    "\(getuid()) \(testRecord.processStartTime)    \(executable.path) app-server daemon pid-update-loop"
 }
 
 private func zombieProcessLine(parentPID: Int32, state: String, startTime: String) -> String {
-    "\(getuid()) \(parentPID) \(state) \(startTime)"
+    "\(getuid()) \(parentPID) \(state)    \(startTime)"
 }
 
 private func expectRecoveryFailure(_ recovery: StaleUpdaterRecovery, codexURL: URL) async {
@@ -578,6 +647,12 @@ private struct FixedPIDRecordLoader: StaleUpdaterPIDRecordLoading {
     let record: StaleUpdaterPIDRecord
 
     func load() throws -> StaleUpdaterPIDRecord { record }
+}
+
+private struct ThrowingPIDRecordLoader: StaleUpdaterPIDRecordLoading {
+    let error: StaleUpdaterRecoveryError
+
+    func load() throws -> StaleUpdaterPIDRecord { throw error }
 }
 
 private actor RecoveryRunner: ProcessRunning {

@@ -6,11 +6,14 @@ public protocol StaleUpdaterRecovering: Sendable {
 }
 
 public enum StaleUpdaterRecoveryError: LocalizedError, Equatable, Sendable {
+    case pidRecordMissing
     case unsafeCandidate(String)
     case processDidNotExit
 
     public var errorDescription: String? {
         switch self {
+        case .pidRecordMissing:
+            "O registro do processo do updater nao existe mais."
         case .unsafeCandidate(let reason):
             "A recuperacao automatica foi cancelada por seguranca: \(reason)"
         case .processDidNotExit:
@@ -107,14 +110,14 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
             // confirmation. Updates can leave the parent mapped to its old
             // release while its command launcher already resolves to current.
             record = try await validatedUpdaterWithZombieChild(codexURL: codexURL)
-        } catch {
+        } catch let zombieRecoveryError {
             do {
                 record = try await validatedStaleUpdater(codexURL: codexURL)
             } catch {
                 // The official Stop is sufficient when neither exceptional
                 // process shape can be proven safe to signal.
                 if stopSucceeded { return }
-                throw error
+                throw zombieRecoveryError
             }
         }
 
@@ -185,25 +188,15 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
             throw StaleUpdaterRecoveryError.unsafeCandidate("o comando que falhou nao e a release standalone atual")
         }
 
-        let updaterRecord = try validatedRecord(pidRecordLoader.load())
         let appServerRecord = try validatedRecord(appServerPIDRecordLoader.load())
-        guard updaterRecord.pid != appServerRecord.pid else {
-            throw StaleUpdaterRecoveryError.unsafeCandidate("os registros do updater e app-server usam o mesmo PID")
-        }
-
-        let initialUpdater = try await inspect(
-            record: updaterRecord,
+        let initialPair = try await inspectZombiePair(
+            appServerRecord: appServerRecord,
             codexURL: codexURL,
-            currentTarget: initialCurrentTarget,
-            releaseRequirement: .managed
-        )
-        let initialChild = try await inspectZombieChild(
-            record: appServerRecord,
-            expectedParentPID: updaterRecord.pid
+            currentTarget: initialCurrentTarget
         )
         let initialFingerprint = StaleUpdaterFingerprint(
-            updater: initialUpdater,
-            zombieChild: initialChild
+            updater: initialPair.updater,
+            zombieChild: initialPair.child
         )
 
         guard !FileManager.default.fileExists(
@@ -217,23 +210,23 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
         guard finalCurrentTarget == initialCurrentTarget else {
             throw StaleUpdaterRecoveryError.unsafeCandidate("a versao atual do Codex mudou durante a verificacao")
         }
-        let finalUpdaterRecord = try validatedRecord(pidRecordLoader.load())
         let finalAppServerRecord = try validatedRecord(appServerPIDRecordLoader.load())
-        guard finalUpdaterRecord == updaterRecord, finalAppServerRecord == appServerRecord else {
+        guard finalAppServerRecord == appServerRecord else {
             throw StaleUpdaterRecoveryError.unsafeCandidate("os registros de processo mudaram durante a verificacao")
         }
-        let finalUpdater = try await inspect(
-            record: finalUpdaterRecord,
+        let finalPair = try await inspectZombiePair(
+            appServerRecord: finalAppServerRecord,
             codexURL: codexURL,
-            currentTarget: finalCurrentTarget,
-            releaseRequirement: .managed
+            currentTarget: finalCurrentTarget
         )
-        let finalChild = try await inspectZombieChild(
-            record: finalAppServerRecord,
-            expectedParentPID: finalUpdaterRecord.pid
+        let finalFingerprint = StaleUpdaterFingerprint(
+            updater: finalPair.updater,
+            zombieChild: finalPair.child
         )
-        let finalFingerprint = StaleUpdaterFingerprint(updater: finalUpdater, zombieChild: finalChild)
-        guard finalFingerprint == initialFingerprint else {
+        guard finalPair.record == initialPair.record,
+              finalPair.source == initialPair.source,
+              finalFingerprint == initialFingerprint
+        else {
             throw StaleUpdaterRecoveryError.unsafeCandidate("a identidade dos processos mudou durante a verificacao")
         }
         guard !FileManager.default.fileExists(
@@ -252,7 +245,67 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
                 "o updater com filho zumbi ja recebeu encerramento para esta identidade"
             )
         }
-        return updaterRecord
+        return finalPair.record
+    }
+
+    /// Validates the updater and its zombie child as one process pair. The
+    /// official Stop may remove app-server-updater.pid before the updater has
+    /// reaped its child. In that precise state, the secured child record's
+    /// kernel PPID becomes the updater candidate, which is then subjected to
+    /// the same uid, executable, command and start-time checks as a recorded
+    /// updater. The source must remain unchanged across both validation passes.
+    private func inspectZombiePair(
+        appServerRecord: StaleUpdaterPIDRecord,
+        codexURL: URL,
+        currentTarget: URL
+    ) async throws -> ValidatedZombiePair {
+        do {
+            let updaterRecord = try validatedRecord(pidRecordLoader.load())
+            guard updaterRecord.pid != appServerRecord.pid else {
+                throw StaleUpdaterRecoveryError.unsafeCandidate(
+                    "os registros do updater e app-server usam o mesmo PID"
+                )
+            }
+            let updater = try await inspect(
+                record: updaterRecord,
+                codexURL: codexURL,
+                currentTarget: currentTarget,
+                releaseRequirement: .managed
+            )
+            let child = try await inspectZombieChild(
+                record: appServerRecord,
+                expectedParentPID: updaterRecord.pid
+            )
+            return ValidatedZombiePair(
+                record: updaterRecord,
+                updater: updater,
+                child: child.fingerprint,
+                source: .pidRecord
+            )
+        } catch StaleUpdaterRecoveryError.pidRecordMissing {
+            let child = try await inspectZombieChild(
+                record: appServerRecord,
+                expectedParentPID: nil
+            )
+            guard child.parentPID > 1, child.parentPID != appServerRecord.pid else {
+                throw StaleUpdaterRecoveryError.unsafeCandidate(
+                    "o PPID do app-server zumbi nao identifica um updater seguro"
+                )
+            }
+            let updater = try await inspect(
+                pid: child.parentPID,
+                expectedStartTime: nil,
+                codexURL: codexURL,
+                currentTarget: currentTarget,
+                releaseRequirement: .managed
+            )
+            return ValidatedZombiePair(
+                record: updater.record,
+                updater: updater.fingerprint,
+                child: child.fingerprint,
+                source: .zombieParent
+            )
+        }
     }
 
     private func validatedRecord(_ record: StaleUpdaterPIDRecord) throws -> StaleUpdaterPIDRecord {
@@ -311,9 +364,25 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
         currentTarget: URL,
         releaseRequirement: ReleaseRequirement
     ) async throws -> StaleUpdaterProcessFingerprint {
+        try await inspect(
+            pid: record.pid,
+            expectedStartTime: record.processStartTime,
+            codexURL: codexURL,
+            currentTarget: currentTarget,
+            releaseRequirement: releaseRequirement
+        ).fingerprint
+    }
+
+    private func inspect(
+        pid: Int32,
+        expectedStartTime: String?,
+        codexURL: URL,
+        currentTarget: URL,
+        releaseRequirement: ReleaseRequirement
+    ) async throws -> ValidatedUpdater {
         let identity: StaleUpdaterProcessIdentity
         do {
-            identity = try processController.identity(pid: record.pid)
+            identity = try processController.identity(pid: pid)
         } catch {
             throw StaleUpdaterRecoveryError.unsafeCandidate("nao foi possivel confirmar a identidade do updater")
         }
@@ -345,7 +414,7 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
         do {
             result = try await runner.run(
                 executable: URL(fileURLWithPath: "/bin/ps"),
-                arguments: ["-ww", "-p", String(record.pid), "-o", "uid=", "-o", "lstart=", "-o", "command="],
+                arguments: ["-ww", "-p", String(pid), "-o", "uid=", "-o", "lstart=", "-o", "command="],
                 environment: ["LC_ALL": "C"],
                 timeout: inspectionTimeout
             )
@@ -373,12 +442,23 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
             throw StaleUpdaterRecoveryError.unsafeCandidate("o usuario do updater nao confere")
         }
 
-        let expectedStartPrefix = record.processStartTime + " "
         let startAndCommand = String(uidAndRemainder[1])
-        guard startAndCommand.hasPrefix(expectedStartPrefix) else {
+        let startTimeAndCommand = startAndCommand.split(
+            maxSplits: 5,
+            whereSeparator: \Character.isWhitespace
+        )
+        guard startTimeAndCommand.count == 6 else {
+            throw StaleUpdaterRecoveryError.unsafeCandidate(
+                "o horario inicial do updater nao pode ser confirmado"
+            )
+        }
+        let processStartTime = startTimeAndCommand.prefix(5).joined(separator: " ")
+        if let expectedStartTime,
+           processStartTime != Self.normalizedProcessStartTime(expectedStartTime) {
             throw StaleUpdaterRecoveryError.unsafeCandidate("o PID foi reutilizado por outro processo")
         }
-        let command = String(startAndCommand.dropFirst(expectedStartPrefix.count))
+        let command = String(startTimeAndCommand[5])
+            .trimmingCharacters(in: .whitespaces)
         guard command.hasSuffix(Self.updaterCommandSuffix) else {
             throw StaleUpdaterRecoveryError.unsafeCandidate("os argumentos do processo nao correspondem ao updater")
         }
@@ -399,18 +479,21 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
             throw StaleUpdaterRecoveryError.unsafeCandidate("o launcher do updater nao pertence ao Codex standalone atual")
         }
 
-        return StaleUpdaterProcessFingerprint(
-            pid: record.pid,
-            processStartTime: record.processStartTime,
-            uid: identity.uid,
-            executable: actualExecutable
+        return ValidatedUpdater(
+            record: StaleUpdaterPIDRecord(pid: pid, processStartTime: processStartTime),
+            fingerprint: StaleUpdaterProcessFingerprint(
+                pid: pid,
+                processStartTime: processStartTime,
+                uid: identity.uid,
+                executable: actualExecutable
+            )
         )
     }
 
     private func inspectZombieChild(
         record: StaleUpdaterPIDRecord,
-        expectedParentPID: Int32
-    ) async throws -> StaleUpdaterProcessFingerprint {
+        expectedParentPID: Int32?
+    ) async throws -> ValidatedZombieChild {
         // macOS deliberately hides libproc executable metadata once a process
         // is a zombie. The current updater's executable is validated above;
         // this child is authenticated by its independently secured PID record
@@ -436,19 +519,30 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
             throw StaleUpdaterRecoveryError.unsafeCandidate("o app-server nao esta mais em execucao")
         }
         let fields = line.trimmingCharacters(in: .whitespaces).split(maxSplits: 3, whereSeparator: \.isWhitespace)
+        let childStartComponents = fields.count == 4
+            ? String(fields[3])
+                .trimmingCharacters(in: .whitespaces)
+                .split(maxSplits: 5, whereSeparator: \Character.isWhitespace)
+            : []
+        let childStartTime = childStartComponents.prefix(5).joined(separator: " ")
         guard fields.count == 4,
               let uid = uid_t(fields[0]), uid == getuid(),
-              let parentPID = Int32(fields[1]), parentPID == expectedParentPID,
+              let parentPID = Int32(fields[1]),
+              expectedParentPID.map({ parentPID == $0 }) ?? true,
               fields[2].first == "Z",
-              String(fields[3]).hasPrefix(record.processStartTime + " ")
+              childStartComponents.count >= 5,
+              childStartTime == Self.normalizedProcessStartTime(record.processStartTime)
         else {
             throw StaleUpdaterRecoveryError.unsafeCandidate("o app-server nao e um filho zumbi seguro do updater")
         }
-        return StaleUpdaterProcessFingerprint(
-            pid: record.pid,
-            processStartTime: record.processStartTime,
-            uid: uid,
-            executable: nil
+        return ValidatedZombieChild(
+            parentPID: parentPID,
+            fingerprint: StaleUpdaterProcessFingerprint(
+                pid: record.pid,
+                processStartTime: record.processStartTime,
+                uid: uid,
+                executable: nil
+            )
         )
     }
 
@@ -474,6 +568,10 @@ public final class StaleUpdaterRecovery: StaleUpdaterRecovering, @unchecked Send
         url.resolvingSymlinksInPath().standardizedFileURL
     }
 
+    private static func normalizedProcessStartTime(_ value: String) -> String {
+        value.split(whereSeparator: \Character.isWhitespace).joined(separator: " ")
+    }
+
     private func isDescendant(_ candidate: URL, of root: URL) -> Bool {
         let rootComponents = root.pathComponents
         let candidateComponents = candidate.pathComponents
@@ -486,6 +584,28 @@ private enum ReleaseRequirement {
     case old
     case current
     case managed
+}
+
+private enum UpdaterCandidateSource: Equatable {
+    case pidRecord
+    case zombieParent
+}
+
+private struct ValidatedUpdater {
+    let record: StaleUpdaterPIDRecord
+    let fingerprint: StaleUpdaterProcessFingerprint
+}
+
+private struct ValidatedZombieChild {
+    let parentPID: Int32
+    let fingerprint: StaleUpdaterProcessFingerprint
+}
+
+private struct ValidatedZombiePair {
+    let record: StaleUpdaterPIDRecord
+    let updater: StaleUpdaterProcessFingerprint
+    let child: StaleUpdaterProcessFingerprint
+    let source: UpdaterCandidateSource
 }
 
 private struct StaleUpdaterProcessFingerprint: Hashable, Sendable {
@@ -523,6 +643,9 @@ struct SecureStaleUpdaterPIDRecordLoader: StaleUpdaterPIDRecordLoading, Sendable
     func load() throws -> StaleUpdaterPIDRecord {
         let descriptor = Darwin.open(fileURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else {
+            if errno == ENOENT {
+                throw StaleUpdaterRecoveryError.pidRecordMissing
+            }
             throw StaleUpdaterRecoveryError.unsafeCandidate("o registro do updater nao e um arquivo seguro")
         }
         defer { Darwin.close(descriptor) }

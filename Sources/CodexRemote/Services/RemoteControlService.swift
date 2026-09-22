@@ -4,6 +4,8 @@ import OSLog
 public enum RemoteControlError: LocalizedError, Equatable, Sendable {
     case commandFailed(action: String, exitCode: Int32, message: String)
     case invalidPairingResponse
+    case pairingUnavailable
+    case stopTimedOut(seconds: TimeInterval)
 
     public var errorDescription: String? {
         switch self {
@@ -12,6 +14,10 @@ public enum RemoteControlError: LocalizedError, Equatable, Sendable {
             return "Nao foi possivel \(action) o Remote Control: \(detail)"
         case .invalidPairingResponse:
             return "O Codex nao retornou um codigo de pareamento valido."
+        case .pairingUnavailable:
+            return "O pareamento não está disponível pela conta atual no Codex CLI. Abra o ChatGPT e vá a Ajustes > Conexões > Controlar este Mac, depois escolha Configurar ou Adicionar. Use a mesma conta e o mesmo workspace no Mac e no celular."
+        case .stopTimedOut(let seconds):
+            return "O Codex não concluiu a parada em \(seconds.formatted()) segundos. O daemon continua ativo."
         }
     }
 
@@ -29,6 +35,10 @@ public enum RemoteControlError: LocalizedError, Equatable, Sendable {
         return normalizedMessage.contains("the connection is errored")
             || normalizedMessage.contains("the remote connection is errored")
     }
+
+    var requiresChatGPTPairingSetup: Bool {
+        self == .pairingUnavailable
+    }
 }
 
 public actor RemoteControlService: RemoteControlServicing {
@@ -43,6 +53,7 @@ public actor RemoteControlService: RemoteControlServicing {
     private let probe: any DaemonStatusProbing
     private let staleUpdaterRecovery: any StaleUpdaterRecovering
     private let commandTimeout: TimeInterval
+    private let stopTimeout: TimeInterval
 
     public init() {
         let runner = ProcessRunner()
@@ -51,6 +62,7 @@ public actor RemoteControlService: RemoteControlServicing {
         self.probe = DaemonStatusProbe(runner: runner)
         self.staleUpdaterRecovery = StaleUpdaterRecovery(runner: runner)
         self.commandTimeout = 15
+        self.stopTimeout = 75
     }
 
     public init(
@@ -58,13 +70,15 @@ public actor RemoteControlService: RemoteControlServicing {
         locator: any CodexLocating,
         probe: any DaemonStatusProbing,
         staleUpdaterRecovery: (any StaleUpdaterRecovering)? = nil,
-        commandTimeout: TimeInterval = 15
+        commandTimeout: TimeInterval = 15,
+        stopTimeout: TimeInterval = 75
     ) {
         self.runner = runner
         self.locator = locator
         self.probe = probe
         self.staleUpdaterRecovery = staleUpdaterRecovery ?? StaleUpdaterRecovery(runner: runner)
         self.commandTimeout = commandTimeout
+        self.stopTimeout = stopTimeout
     }
 
     public func status() async -> DaemonState {
@@ -83,12 +97,33 @@ public actor RemoteControlService: RemoteControlServicing {
     }
 
     public func stop() async throws -> DaemonState {
-        try await execute(action: "parar", subcommand: "stop")
-        return await status()
+        let codexURL = try locator.locate()
+
+        do {
+            try await execute(
+                action: "parar",
+                subcommand: "stop",
+                codexURL: codexURL,
+                timeout: stopTimeout
+            )
+        } catch let error as ProcessRunnerError {
+            guard case .timedOut = error else { throw error }
+
+            let finalState = await probe.status(codexURL: codexURL)
+            if case .stopped = finalState {
+                return finalState
+            }
+            if case .running = finalState {
+                throw RemoteControlError.stopTimedOut(seconds: stopTimeout)
+            }
+            throw error
+        }
+
+        return await probe.status(codexURL: codexURL)
     }
 
     public func restart() async throws -> DaemonState {
-        try await execute(action: "parar", subcommand: "stop")
+        _ = try await stop()
         if let state = try await startRecoveringStaleUpdaterOnce() {
             return state
         }
@@ -104,6 +139,9 @@ public actor RemoteControlService: RemoteControlServicing {
             timeout: commandTimeout
         )
         guard result.exitCode == 0 else {
+            if Self.isPairingUnavailableMessage(result.stderrString) {
+                throw RemoteControlError.pairingUnavailable
+            }
             throw commandError(action: "parear", result: result)
         }
         // The raw pairing response deliberately has no lifetime beyond this stack frame.
@@ -130,7 +168,7 @@ public actor RemoteControlService: RemoteControlServicing {
                 try await staleUpdaterRecovery.recover(codexURL: codexURL)
             } catch {
                 Self.logger.error(
-                    "Automatic recovery after Start timeout failed: \(error.localizedDescription, privacy: .private)"
+                    "Automatic recovery after Start timeout failed: \(error.localizedDescription, privacy: .public)"
                 )
                 // Recovery diagnostics must not replace the original Start timeout.
                 throw originalTimeout
@@ -144,7 +182,7 @@ public actor RemoteControlService: RemoteControlServicing {
                 try await staleUpdaterRecovery.recover(codexURL: codexURL)
             } catch {
                 Self.logger.error(
-                    "Automatic recovery after app-server failure failed: \(error.localizedDescription, privacy: .private)"
+                    "Automatic recovery after app-server failure failed: \(error.localizedDescription, privacy: .public)"
                 )
                 // Recovery diagnostics must not replace the original, user-safe Start error.
                 throw originalError
@@ -156,12 +194,17 @@ public actor RemoteControlService: RemoteControlServicing {
         return nil
     }
 
-    private func execute(action: String, subcommand: String, codexURL: URL? = nil) async throws {
+    private func execute(
+        action: String,
+        subcommand: String,
+        codexURL: URL? = nil,
+        timeout: TimeInterval? = nil
+    ) async throws {
         let result = try await runner.run(
             executable: try codexURL ?? locator.locate(),
             arguments: ["remote-control", subcommand, "--json"],
             environment: nil,
-            timeout: commandTimeout
+            timeout: timeout ?? commandTimeout
         )
         guard result.exitCode == 0 else { throw commandError(action: action, result: result) }
     }
@@ -204,6 +247,17 @@ public actor RemoteControlService: RemoteControlServicing {
         let normalized = message.lowercased()
         return normalized.contains("app server did not become ready")
             && normalized.contains("app-server-control.sock")
+    }
+
+    private static func isPairingUnavailableMessage(_ message: String) -> Bool {
+        let normalized = normalizeWhitespace(in: stripANSI(from: message)).lowercased()
+        return normalized.contains("timed out waiting for remotecontrol/pairing/start response")
+            || normalized.contains("remote control pairing is unavailable until enrollment completes")
+            || normalized.contains("remote control pairing requires remote control to be enabled")
+            || (
+                normalized.contains("remotecontrol/pairing/start failed")
+                    && normalized.contains("remote control server enrollment failed")
+            )
     }
 
     private static func stripANSI(from value: String) -> String {

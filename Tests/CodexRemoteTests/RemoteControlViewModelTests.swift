@@ -69,6 +69,24 @@ struct RemoteControlViewModelTests {
         #expect(viewModel.daemonState == .stopped)
     }
 
+    @Test("Failed Stop keeps the running state and explains that the daemon is active")
+    func failedStopExplainsRunningDaemon() async {
+        let service = FakeRemoteControlService(
+            statuses: [.running(cliVersion: "0.152.1", appServerVersion: "0.152.1")],
+            stopResults: [.failure(.stopTimedOut(seconds: 75))]
+        )
+        let viewModel = RemoteControlViewModel(service: service)
+
+        await viewModel.stop()
+
+        #expect(viewModel.daemonState == .running(
+            cliVersion: "0.152.1",
+            appServerVersion: "0.152.1"
+        ))
+        #expect(viewModel.lastError == "O Codex não concluiu a parada em 75 segundos. O daemon continua ativo.")
+        #expect(viewModel.canStop)
+    }
+
     @Test("Manual start resumes automatic recovery after a manual stop")
     func manualStartResumesAutomaticRecovery() async {
         let service = FakeRemoteControlService(statuses: [
@@ -173,6 +191,7 @@ struct RemoteControlViewModelTests {
 
         #expect(await waitUntil { await service.startCallCount == 2 })
         try? await Task.sleep(nanoseconds: 10_000_000)
+        await viewModel.reconcile(autoStart: true)
         #expect(await service.startCallCount == 2)
         #expect(viewModel.daemonState == .stopped)
     }
@@ -344,11 +363,13 @@ struct RemoteControlViewModelTests {
         #expect(await waitUntil { await service.didStartStopping })
         #expect(viewModel.operation == .restartStopping)
         #expect(viewModel.statusTitle == "Parando para reiniciar…")
+        #expect(viewModel.statusDetail == "A parada segura do Codex pode levar cerca de um minuto.")
 
         await service.finishStop()
         #expect(await waitUntil { await service.didStartStarting })
         #expect(viewModel.operation == .restartStarting)
         #expect(viewModel.statusTitle == "Iniciando novamente…")
+        #expect(viewModel.statusDetail == "O app está aguardando o servidor local do Codex ficar pronto.")
 
         await service.setStatus(.running(cliVersion: "0.144.3", appServerVersion: "0.144.3"))
         #expect(await waitUntil { viewModel.operation == .restartReconnecting })
@@ -367,6 +388,26 @@ struct RemoteControlViewModelTests {
         #expect(await service.stopCallCount == 1)
         #expect(await service.startCallCount == 1)
         #expect(await service.restartCallCount == 0)
+    }
+
+    @Test("A failed Restart does not trigger automatic Start loops")
+    func failedRestartSuppressesAutomaticStart() async {
+        let service = FakeRemoteControlService(
+            statuses: [.stopped, .stopped],
+            startResults: [.failure(.startFailed)]
+        )
+        let viewModel = RemoteControlViewModel(
+            service: service,
+            automaticStartRetryInterval: 0
+        )
+
+        await viewModel.restart()
+        await viewModel.reconcile(autoStart: true)
+
+        #expect(await service.stopCallCount == 1)
+        #expect(await service.startCallCount == 1)
+        #expect(viewModel.daemonState == .stopped)
+        #expect(viewModel.lastError == "Falha simulada ao iniciar")
     }
 
     @Test("A remote connection error is a warning when the daemon is already running")
@@ -391,6 +432,24 @@ struct RemoteControlViewModelTests {
 
         viewModel.clearWarning()
         #expect(viewModel.lastWarning == nil)
+    }
+
+    @Test("Unavailable pairing exposes ChatGPT setup guidance")
+    func unavailablePairingRequiresChatGPTSetup() async {
+        let service = FakeRemoteControlService(
+            statuses: [.running(cliVersion: nil, appServerVersion: nil)],
+            pairResults: [.failure(.pairingUnavailable)]
+        )
+        let viewModel = RemoteControlViewModel(service: service)
+
+        await viewModel.pair()
+
+        #expect(viewModel.pairingCode == nil)
+        #expect(viewModel.pairingSetupRequired)
+        #expect(viewModel.lastError?.contains("Ajustes > Conexões > Controlar este Mac") == true)
+
+        viewModel.clearError()
+        #expect(!viewModel.pairingSetupRequired)
     }
 
     @Test("A normal start does not run the restart status monitor")
@@ -452,6 +511,8 @@ private actor FakeRemoteControlService: RemoteControlServicing {
     private var pendingStatuses: [DaemonState]
     private var pendingStartResults: [Result<DaemonState, FakeRemoteControlError>]
     private var pendingRemoteStartErrors: [RemoteControlError]
+    private var pendingStopResults: [Result<DaemonState, RemoteControlError>]
+    private var pendingPairResults: [Result<PairingCode, RemoteControlError>]
     private(set) var statusCallCount = 0
     private(set) var startCallCount = 0
     private(set) var stopCallCount = 0
@@ -460,11 +521,15 @@ private actor FakeRemoteControlService: RemoteControlServicing {
     init(
         statuses: [DaemonState],
         startResults: [Result<DaemonState, FakeRemoteControlError>] = [],
-        remoteStartErrors: [RemoteControlError] = []
+        remoteStartErrors: [RemoteControlError] = [],
+        stopResults: [Result<DaemonState, RemoteControlError>] = [],
+        pairResults: [Result<PairingCode, RemoteControlError>] = []
     ) {
         pendingStatuses = statuses
         pendingStartResults = startResults
         pendingRemoteStartErrors = remoteStartErrors
+        pendingStopResults = stopResults
+        pendingPairResults = pairResults
     }
 
     func status() async -> DaemonState {
@@ -486,6 +551,9 @@ private actor FakeRemoteControlService: RemoteControlServicing {
 
     func stop() async throws -> DaemonState {
         stopCallCount += 1
+        if !pendingStopResults.isEmpty {
+            return try pendingStopResults.removeFirst().get()
+        }
         return .stopped
     }
 
@@ -495,7 +563,10 @@ private actor FakeRemoteControlService: RemoteControlServicing {
     }
 
     func pair() async throws -> PairingCode {
-        PairingCode(manualCode: "TEST-CODE", expiresAt: nil)
+        if !pendingPairResults.isEmpty {
+            return try pendingPairResults.removeFirst().get()
+        }
+        return PairingCode(manualCode: "TEST-CODE", expiresAt: nil)
     }
 }
 

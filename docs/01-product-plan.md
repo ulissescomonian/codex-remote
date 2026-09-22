@@ -41,7 +41,7 @@ O usuario usa o Codex CLI no Mac e quer que o Remote Control esteja disponivel d
 7. Restart informa separadamente quando esta parando, iniciando e aguardando a reconexao remota.
 8. Se o daemon voltar, mas o CLI reportar falha da conexao remota, o menu registra o fato como aviso do ultimo inicio, em tempo passado, sem apresenta-lo como status remoto atual ou afirmar que o daemon falhou.
 9. O menu mostra estado, acoes coerentes e a hora da ultima verificacao.
-10. Pair mostra o QR oficial e o codigo manual em uma pequena janela, oferece Copiar para o codigo manual e descarta os dois ao fechar.
+10. Pair mostra o QR oficial e o codigo manual quando o CLI ainda fornece esses artefatos, oferece Copiar para o codigo manual e descarta os dois ao fechar. Se a conta ou workspace nao disponibilizar o pareamento pelo CLI, o menu orienta o fluxo atual no ChatGPT e oferece abri-lo.
 
 ## Roadmap
 
@@ -78,6 +78,8 @@ O usuario usa o Codex CLI no Mac e quer que o Remote Control esteja disponivel d
 - O status distingue daemon parado, daemon respondendo e falha desconhecida pelo probe local de socket.
 - Pairing code nao aparece em logs, UserDefaults ou mensagens de erro persistidas.
 - O QR usa o `pairingCode` opaco na URL oficial de pareamento; nunca transforma o codigo manual em QR.
+- A indisponibilidade de `remoteControl/pairing/start`, inclusive rejeicao de enrollment pelo backend, nao exibe o erro interno do CLI; orienta Ajustes > Conexoes > Controlar este Mac no ChatGPT.
+- O menu mantem uma altura fixa e compacta: erros, avisos e controles compartilham a mesma area central, evitando deslocamento ou alongamento da janela quando o conteudo muda.
 - Binario ausente gera instrucao clara para configurar o caminho.
 - Testes nao alteram o daemon real do usuario.
 

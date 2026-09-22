@@ -33,6 +33,7 @@ final class RemoteControlViewModel: ObservableObject {
     @Published private(set) var lastCheckedAt: Date?
     @Published var lastError: String?
     @Published private(set) var lastWarning: String?
+    @Published private(set) var pairingSetupRequired = false
 
     private let service: any RemoteControlServicing
     private let automaticStartRetryInterval: TimeInterval
@@ -72,6 +73,15 @@ final class RemoteControlViewModel: ObservableObject {
     }
 
     var statusDetail: String? {
+        switch operation {
+        case .stopping, .restartStopping:
+            return "A parada segura do Codex pode levar cerca de um minuto."
+        case .starting, .restartStarting, .restartReconnecting:
+            return "O app está aguardando o servidor local do Codex ficar pronto."
+        case .checking, .pairing, .none:
+            break
+        }
+
         switch daemonState {
         case .stopped:
             return nil
@@ -150,6 +160,7 @@ final class RemoteControlViewModel: ObservableObject {
     func restart() async {
         guard operation == nil else { return }
         cancelAutomaticStartRetry()
+        isAutomaticRecoverySuppressed = false
         operation = .restartStopping
         clearMessages()
 
@@ -169,6 +180,7 @@ final class RemoteControlViewModel: ObservableObject {
             lastCheckedAt = Date()
         } catch {
             await recordStartFailure(error)
+            isAutomaticRecoverySuppressed = true
         }
         operation = nil
     }
@@ -181,6 +193,7 @@ final class RemoteControlViewModel: ObservableObject {
         do {
             pairingCode = try await service.pair()
         } catch {
+            pairingSetupRequired = (error as? RemoteControlError)?.requiresChatGPTPairingSetup == true
             lastError = Self.friendlyMessage(for: error)
         }
         operation = nil
@@ -192,6 +205,7 @@ final class RemoteControlViewModel: ObservableObject {
 
     func clearError() {
         lastError = nil
+        pairingSetupRequired = false
     }
 
     func clearWarning() {
@@ -249,6 +263,8 @@ final class RemoteControlViewModel: ObservableObject {
            !isAutomaticRecoverySuppressed,
            case .stopped = daemonState {
             scheduleAutomaticStartRetry()
+        } else if !succeeded, !scheduleRetryAfterFailure {
+            isAutomaticRecoverySuppressed = true
         }
     }
 
@@ -393,6 +409,7 @@ final class RemoteControlViewModel: ObservableObject {
     private func clearMessages() {
         lastError = nil
         lastWarning = nil
+        pairingSetupRequired = false
     }
 
     private var canAttemptAutomaticStart: Bool {

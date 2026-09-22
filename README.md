@@ -210,6 +210,8 @@ The manual code is never substituted into the QR payload. The QR image is genera
 
 Pairing data lives only in memory and is discarded when the pairing window closes. Codex Remote does not persist the pairing response or include it in error messages. Choosing **Copiar código** intentionally places the manual code on the macOS clipboard.
 
+Current ChatGPT Remote setup starts in the ChatGPT desktop app. If the CLI reports that `remoteControl/pairing/start` is unavailable for the active account or workspace, Codex Remote replaces the internal timeout with setup guidance and an **Open ChatGPT** button. In ChatGPT, use **Settings > Connections > Control this Mac > Set up or Add**, then confirm the same account and workspace on the Mac and phone.
+
 ## Settings
 
 | Setting | Default | Description |
@@ -332,7 +334,7 @@ plutil -lint .build/CodexRemote.app/Contents/Info.plist
 codesign --verify --deep --strict .build/CodexRemote.app
 ```
 
-The current test suite contains 84 tests across 7 suites, covering process timeouts, daemon state, update recovery, app lifecycle, login items, QR generation and decoding, pairing parsing, automatic retries, and view-model behavior. Tests do not mutate the user's real Codex daemon.
+The current test suite contains 96 tests across 8 suites, covering process timeouts, daemon state, update recovery, app lifecycle, login items, QR generation and decoding, pairing parsing, account-specific pairing guidance, stable menu geometry, automatic retries, and view-model behavior. Tests do not mutate the user's real Codex daemon.
 
 ### Package the Preview DMG
 
@@ -442,6 +444,8 @@ Open Codex Remote Settings and select **Abrir Ajustes do Sistema**, then approve
 ### Pair is disabled or only a manual code is shown
 
 Pairing is available only while the local daemon is active. Older or transitional Codex responses may provide only a manual code; Codex Remote preserves that compatibility path instead of inventing a QR payload.
+
+If Pair reports that setup is unavailable for the current account, use the offered **Open ChatGPT** action. Remote availability can depend on the account, workspace rollout, and administrator settings, so restarting the local daemon cannot manufacture a QR code when the service has not enabled pairing.
 
 ## Current Limitations
 

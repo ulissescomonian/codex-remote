@@ -46,6 +46,8 @@ struct RemoteControlServiceTests {
                 message: "Remote control is enabled on host.local but the connection timed out."
             ),
             .invalidPairingResponse,
+            .pairingUnavailable,
+            .stopTimedOut(seconds: 75),
         ]
 
         for error in errors {
@@ -96,12 +98,66 @@ struct RemoteControlServiceTests {
 
         let state = try await service.restart()
         let calls = await runner.arguments
+        let timeouts = await runner.timeouts
 
         #expect(state == .running(cliVersion: "cli", appServerVersion: "server"))
         #expect(calls == [
             ["remote-control", "stop", "--json"],
             ["remote-control", "start", "--json"],
         ])
+        #expect(timeouts == [75, 15])
+    }
+
+    @Test("Stop allows the daemon graceful shutdown window")
+    func stopUsesDedicatedTimeout() async throws {
+        let runner = FakeRunner(results: [
+            .init(exitCode: 0, stdout: Data(#"{}"#.utf8), stderr: Data()),
+        ])
+        let service = RemoteControlService(
+            runner: runner,
+            locator: FixedLocator(),
+            probe: FixedProbe(state: .stopped)
+        )
+
+        let state = try await service.stop()
+        let calls = await runner.arguments
+        let timeouts = await runner.timeouts
+
+        #expect(state == .stopped)
+        #expect(calls == [["remote-control", "stop", "--json"]])
+        #expect(timeouts == [75])
+    }
+
+    @Test("Stop timeout is success when the daemon finished stopping")
+    func stopTimeoutReturnsStoppedStateWhenProbeIsStopped() async throws {
+        let runner = FakeRunner(responses: [.failure(.timedOut(seconds: 75))])
+        let service = RemoteControlService(
+            runner: runner,
+            locator: FixedLocator(),
+            probe: FixedProbe(state: .stopped)
+        )
+
+        let state = try await service.stop()
+
+        #expect(state == .stopped)
+    }
+
+    @Test("Stop timeout explains when the daemon remains active")
+    func stopTimeoutReportsRunningDaemon() async {
+        let runner = FakeRunner(responses: [.failure(.timedOut(seconds: 75))])
+        let service = RemoteControlService(
+            runner: runner,
+            locator: FixedLocator(),
+            probe: FixedProbe(state: .running(cliVersion: "cli", appServerVersion: "server"))
+        )
+
+        do {
+            _ = try await service.stop()
+            Issue.record("Stop deveria informar que o daemon continua ativo")
+        } catch {
+            #expect(error as? RemoteControlError == .stopTimedOut(seconds: 75))
+            #expect(error.localizedDescription == "O Codex não concluiu a parada em 75 segundos. O daemon continua ativo.")
+        }
     }
 
     @Test("Matching stale updater failure recovers and retries Start once")
@@ -491,6 +547,84 @@ struct RemoteControlServiceTests {
         }
     }
 
+    @Test("Pairing timeout from the remote backend becomes an actionable account error")
+    func pairMapsRemoteBackendTimeout() async {
+        let runner = FakeRunner(results: [
+            .init(
+                exitCode: 1,
+                stdout: Data(),
+                stderr: Data(
+                    "Error: timed out waiting for remoteControl/pairing/start response\n\nCaused by:\n    deadline has elapsed\n".utf8
+                )
+            ),
+        ])
+        let service = RemoteControlService(
+            runner: runner,
+            locator: FixedLocator(),
+            probe: FixedProbe(state: .running(cliVersion: nil, appServerVersion: nil))
+        )
+
+        do {
+            _ = try await service.pair()
+            Issue.record("Pair deveria orientar a configuração pelo ChatGPT")
+        } catch {
+            #expect(error as? RemoteControlError == .pairingUnavailable)
+            #expect(!error.localizedDescription.contains("deadline has elapsed"))
+        }
+    }
+
+    @Test("Pairing enrollment rejection is hidden behind account guidance")
+    func pairMapsRemoteEnrollmentRejection() async {
+        let backendDetail = "Multi-factor authentication required"
+        let runner = FakeRunner(results: [
+            .init(
+                exitCode: 1,
+                stdout: Data(),
+                stderr: Data(
+                    "Error: remoteControl/pairing/start failed: remote control server enrollment failed at 'https://chatgpt.com/backend-api/wham/remote/control/server/enroll': HTTP 403 Forbidden, body: {\"detail\":\"\u{001B}[31m\(backendDetail)\u{001B}[0m\"}".utf8
+                )
+            ),
+        ])
+        let service = RemoteControlService(
+            runner: runner,
+            locator: FixedLocator(),
+            probe: FixedProbe(state: .running(cliVersion: nil, appServerVersion: nil))
+        )
+
+        do {
+            _ = try await service.pair()
+            Issue.record("Pair deveria ocultar a rejeição técnica de enrollment")
+        } catch {
+            #expect(error as? RemoteControlError == .pairingUnavailable)
+            #expect(!error.localizedDescription.contains("HTTP 403"))
+            #expect(!error.localizedDescription.contains(backendDetail))
+            #expect(!error.localizedDescription.contains("backend-api"))
+        }
+    }
+
+    @Test("Unrelated Pair failures remain command errors")
+    func pairPreservesUnrelatedFailure() async {
+        let runner = FakeRunner(results: [
+            .init(exitCode: 7, stdout: Data(), stderr: Data("network unavailable".utf8)),
+        ])
+        let service = RemoteControlService(
+            runner: runner,
+            locator: FixedLocator(),
+            probe: FixedProbe(state: .running(cliVersion: nil, appServerVersion: nil))
+        )
+
+        do {
+            _ = try await service.pair()
+            Issue.record("Pair deveria preservar a falha não classificada")
+        } catch {
+            #expect(error as? RemoteControlError == .commandFailed(
+                action: "parear",
+                exitCode: 7,
+                message: "network unavailable"
+            ))
+        }
+    }
+
     private func makeService(
         runner: FakeRunner,
         recovery: FakeStaleUpdaterRecovery
@@ -511,6 +645,7 @@ struct RemoteControlServiceTests {
 private actor FakeRunner: ProcessRunning {
     private var pendingResponses: [FakeRunnerResponse]
     private(set) var arguments: [[String]] = []
+    private(set) var timeouts: [TimeInterval] = []
 
     init(results: [ProcessResult]) {
         pendingResponses = results.map(FakeRunnerResponse.success)
@@ -527,6 +662,7 @@ private actor FakeRunner: ProcessRunning {
         timeout: TimeInterval
     ) async throws -> ProcessResult {
         self.arguments.append(arguments)
+        self.timeouts.append(timeout)
         guard !pendingResponses.isEmpty else {
             throw ProcessRunnerError.launchFailed("resultado falso ausente")
         }
