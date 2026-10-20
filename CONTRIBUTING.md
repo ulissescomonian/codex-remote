@@ -47,7 +47,7 @@ Create the local distribution artifacts with:
 
 ```bash
 make dmg
-(cd dist && shasum -a 256 -c CodexRemote-1.0-arm64.dmg.sha256)
+(cd dist && shasum -a 256 -c CodexRemote-1.0.1-arm64.dmg.sha256)
 ```
 
 The DMG contains `CodexRemote.app` and an `/Applications` shortcut. The script

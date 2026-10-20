@@ -78,8 +78,24 @@ Os testes usam doubles e nao executam Start, Stop ou Pair reais.
 - Sidecar: `CodexRemote-1.0-arm64.dmg.sha256`, validado com `shasum -c`.
 
 O app e assinado localmente para integridade do bundle, sem identidade Apple ou
-Team ID. O app e o DMG nao sao notarizados. O DMG permanece fora do Git e deve
-ser publicado junto com o checksum nos assets da GitHub Release `v1.0`.
+Team ID. O app e o DMG nao sao notarizados. O DMG permanece fora do Git e foi
+publicado junto com o checksum nos assets da GitHub Release `v1.0`.
+
+## Distribuicao 1.0.1
+
+Revalidado em 20 de outubro de 2026 para publicar as correcoes de recuperacao,
+pareamento e interface ja presentes no commit `fd1c26e`.
+
+- `swift build`: passou.
+- `swift test`: 96 testes em 8 suites, todos passaram, sem alterar o daemon real.
+- `make bundle`: produziu o app Release arm64 `1.0.1` (`2`).
+- `plutil -lint` e `codesign --verify --deep --strict`: passaram.
+- `make dmg`: produziu e verificou `CodexRemote-1.0.1-arm64.dmg`.
+- SHA-256 do DMG:
+  `fbfa5b5f68d89affab3477d399a4f6a26b5201b031d30c294b9832fd0a67d9e7`.
+- Sidecar: `CodexRemote-1.0.1-arm64.dmg.sha256`, validado com `shasum -c`.
+
+O app mantem assinatura ad-hoc local; app e DMG nao sao notarizados.
 
 ## Pendente para distribuicao
 

@@ -13,23 +13,23 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ulissescomonian/codex-remote/releases/tag/v1.0"><img src="https://img.shields.io/badge/version-1.0-blue?style=flat-square" alt="Version 1.0"></a>
+  <a href="https://github.com/ulissescomonian/codex-remote/releases/tag/v1.0.1"><img src="https://img.shields.io/badge/version-1.0.1-blue?style=flat-square" alt="Version 1.0.1"></a>
   <img src="https://img.shields.io/badge/macOS-14.0%2B-black?style=flat-square&amp;logo=apple" alt="macOS 14.0 or later">
   <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-555555?style=flat-square&amp;logo=apple" alt="Apple Silicon arm64">
   <img src="https://img.shields.io/badge/Swift-5.9%2B-orange?style=flat-square&amp;logo=swift" alt="Swift 5.9 or later">
-  <a href="https://github.com/ulissescomonian/codex-remote/releases/tag/v1.0"><img src="https://img.shields.io/badge/status-Experimental-yellow?style=flat-square" alt="Experimental status"></a>
+  <a href="https://github.com/ulissescomonian/codex-remote/releases/tag/v1.0.1"><img src="https://img.shields.io/badge/status-Experimental-yellow?style=flat-square" alt="Experimental status"></a>
   <a href="https://github.com/ulissescomonian/codex-remote/actions/workflows/ci.yml"><img src="https://github.com/ulissescomonian/codex-remote/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/ulissescomonian/codex-remote?style=flat-square" alt="MIT License"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/ulissescomonian/codex-remote/releases/download/v1.0/CodexRemote-1.0-arm64.dmg"><strong>Download Codex Remote 1.0 for Apple Silicon (.dmg)</strong></a>
+  <a href="https://github.com/ulissescomonian/codex-remote/releases/download/v1.0.1/CodexRemote-1.0.1-arm64.dmg"><strong>Download Codex Remote 1.0.1 for Apple Silicon (.dmg)</strong></a>
   <br>
-  <a href="https://github.com/ulissescomonian/codex-remote/releases/tag/v1.0">Release notes and SHA-256 checksum</a>
+  <a href="https://github.com/ulissescomonian/codex-remote/releases/tag/v1.0.1">Release notes and SHA-256 checksum</a>
 </p>
 
 > [!IMPORTANT]
-> Codex Remote 1.0 (build 1) is an experimental Preview. Its Apple Silicon
+> Codex Remote 1.0.1 (build 2) is an experimental Preview. Its Apple Silicon
 > app has a local ad-hoc signature, not an Apple Developer ID signature. Neither
 > the app nor the DMG is notarized by Apple. Install it only from a source you
 > trust, and never disable Gatekeeper to open it.
@@ -71,13 +71,13 @@ an Applications shortcut.
 
 ### Install the Preview DMG
 
-1. Download `CodexRemote-1.0-arm64.dmg` and its `.sha256` file from the
-   [v1.0 Release](https://github.com/ulissescomonian/codex-remote/releases/tag/v1.0).
+1. Download `CodexRemote-1.0.1-arm64.dmg` and its `.sha256` file from the
+   [v1.0.1 Release](https://github.com/ulissescomonian/codex-remote/releases/tag/v1.0.1).
 2. Optionally verify the download in Terminal:
 
    ```bash
    cd ~/Downloads
-   shasum -a 256 -c CodexRemote-1.0-arm64.dmg.sha256
+   shasum -a 256 -c CodexRemote-1.0.1-arm64.dmg.sha256
    ```
 
 3. Open the DMG and drag **Codex Remote.app** to **Applications**.
@@ -342,7 +342,7 @@ After the validation gates pass, create and verify the release artifacts:
 
 ```bash
 make dmg
-(cd dist && shasum -a 256 -c CodexRemote-1.0-arm64.dmg.sha256)
+(cd dist && shasum -a 256 -c CodexRemote-1.0.1-arm64.dmg.sha256)
 ```
 
 `Scripts/package_app.sh` builds and verifies the ad-hoc signed application.
