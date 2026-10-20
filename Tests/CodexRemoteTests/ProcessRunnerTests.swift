@@ -31,7 +31,9 @@ struct ProcessRunnerTests {
     @Test("Timeout waits for the parent process to terminate")
     func timeoutWaitsForParentTermination() async throws {
         let runner = ProcessRunner()
-        let timeout: TimeInterval = 0.1
+        // CI can take longer than 100 ms to start /bin/sh while other tests run.
+        // Give the shell time to install the trap before the runner's timeout.
+        let timeout: TimeInterval = 2
         let pidFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-remote-process-runner-\(UUID().uuidString).pid")
         defer { try? FileManager.default.removeItem(at: pidFile) }
@@ -44,7 +46,7 @@ struct ProcessRunnerTests {
                 executable: URL(fileURLWithPath: "/bin/sh"),
                 arguments: [
                     "-c",
-                    "echo $$ > \"$1\"; trap '' TERM; while :; do :; done",
+                    "trap '' TERM; echo $$ > \"$1\"; while :; do :; done",
                     "sh",
                     pidFile.path,
                 ],
@@ -56,8 +58,8 @@ struct ProcessRunnerTests {
         }
 
         let elapsed = startedAt.duration(to: clock.now)
-        #expect(elapsed >= .milliseconds(500))
-        #expect(elapsed < .seconds(2))
+        #expect(elapsed >= .seconds(2.5))
+        #expect(elapsed < .seconds(5))
 
         let pidText = try String(contentsOf: pidFile, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
